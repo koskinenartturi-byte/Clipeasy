@@ -18,12 +18,12 @@ button,input,select{font:inherit}button{background:var(--panel2);border:1px soli
 label{display:block;color:var(--muted);font-size:12px;margin:12px 0 5px}input[type=text],input[type=number],select{width:100%;padding:8px;background:#10131b;color:var(--text);border:1px solid var(--line);border-radius:7px}input[type=range]{width:100%}.section{border-top:1px solid var(--line);padding-top:12px;margin-top:12px}.hidden{display:none!important}.notice{background:#30291d;color:#f2d69d;border-radius:8px;padding:9px;font-size:12px}
 footer{padding:8px 14px;border-top:1px solid var(--line);color:var(--muted);font-size:12px}
 @media(max-width:1000px){.layout{grid-template-columns:215px minmax(0,1fr)}.right{grid-column:1/-1;border-left:0;border-top:1px solid var(--line);display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.right h2,.right .notice{grid-column:1/-1}}
-@media(max-width:700px){.layout{display:flex;flex-direction:column}.left{order:2;border:0;border-top:1px solid var(--line)}.workspace{order:1;padding:8px}.right{order:3;display:block}.top{padding:9px}.stage-wrap{min-height:190px}.stage canvas{max-height:52vh}}
+@media(max-width:700px){.layout{display:flex;flex-direction:column}.left{order:2;border:0;border-top:1px solid var(--line)}.workspace{order:1;padding:8px}.right{order:3;display:block}.top{padding:9px}.stage-wrap{min-height:190px}.stage canvas{max-height:52vh}input,select,button{font-size:16px}}
 </style>
 </head>
 <body>
 <header class="top">
-<div class="brand">Clip<span>Easy</span></div><span class="muted">V0.2</span><span class="spacer"></span>
+<div class="brand">Clip<span>Easy</span></div><span class="muted">V0.2.1</span><span class="spacer"></span>
 <button id="new">Uusi</button><button id="undo" disabled>↶</button><button id="redo" disabled>↷</button><button id="export" class="primary">Vie WebM</button>
 </header>
 <main class="layout">
@@ -52,15 +52,15 @@ footer{padding:8px 14px;border-top:1px solid var(--line);color:var(--muted);font
 <div class="section"><h3>Teksti</h3><label>Sisältö</label><input id="text" type="text" placeholder="Kirjoita teksti…"><label>Sijainti</label><select id="pos"><option value="top">Ylhäällä</option><option value="middle">Keskellä</option><option value="bottom">Alhaalla</option></select><label>Koko: <span id="textSizeText">42 px</span></label><input id="textSize" type="range" min="18" max="100" step="2" value="42"></div>
 <div class="row section"><button id="left">←</button><button id="right">→</button></div>
 </div>
-<div class="notice section">V0.2:n selainvienti on WebM. MP4-vienti, tarkempi äänimiksaus ja automaattinen leikkaus ovat seuraavia kehitysvaiheita.</div>
+<div class="notice section">Vienti on WebM ja sisältää nyt äänen. Projekti tallentuu automaattisesti tämän selaimen muistiin. MP4-vienti ja automaattinen leikkaus ovat seuraavia kehitysvaiheita.</div>
 </aside>
 </main><footer id="status">Valmis.</footer>
 <script>
 const $=id=>document.getElementById(id),canvas=$('canvas'),ctx=canvas.getContext('2d');
-const S={clips:[],assets:new Map(),selected:null,ratio:'9:16',time:0,playing:false,history:[],future:[],id:1};
-const vids=new Map(),imgs=new Map();let drag=-1,last=0,raf=0;
+const S={clips:[],assets:new Map(),selected:null,ratio:'9:16',time:0,playing:false,recording:false,recorder:null,activeIndex:null,activeVideo:null,imageClockStart:0,history:[],future:[],id:1,audioCtx:null,audioDest:null};
+const vids=new Map(),imgs=new Map(),elNodes=new Map();let drag=-1,raf=0;
 const snap=()=>JSON.stringify({clips:S.clips,ratio:S.ratio,selected:S.selected,id:S.id});
-function commit(){S.history.push(snap());if(S.history.length>50)S.history.shift();S.future=[];hist()}
+function commit(){S.history.push(snap());if(S.history.length>50)S.history.shift();S.future=[];hist();persistProject()}
 function hist(){$('undo').disabled=!S.history.length;$('redo').disabled=!S.future.length}
 function restore(x){Object.assign(S,JSON.parse(x));render()}
 $('undo').onclick=()=>{if(S.history.length){S.future.push(snap());restore(S.history.pop())}}
@@ -70,8 +70,37 @@ function dur(c){return Math.max(.1,(c.end-c.start)/c.speed)}
 function total(){return S.clips.reduce((n,c)=>n+dur(c),0)}
 function time(t){return String(Math.floor(t/60)).padStart(2,'0')+':'+String(Math.floor(t%60)).padStart(2,'0')}
 function chosen(){return S.clips.find(c=>c.id===S.selected)}
-function addFile(f){const id='a'+S.id++,url=URL.createObjectURL(f);S.assets.set(id,{file:f,url,type:f.type});return id}
-function addClip(aid){const a=S.assets.get(aid),image=a.type.startsWith('image/'),c={id:'c'+S.id++,asset:aid,name:a.file.name,start:0,end:image?4:10,speed:1,volume:1,filter:'none',text:'',pos:'bottom',textSize:42};S.clips.push(c);if(!image){const v=document.createElement('video');v.src=a.url;v.preload='metadata';v.muted=true;v.onloadedmetadata=()=>{c.end=v.duration||10;render()};vids.set(c.id,v)}else{const im=new Image();im.src=a.url;imgs.set(c.id,im)}if(S.selected===null)S.selected=c.id}
+
+// ---------- IndexedDB: stores the actual media blobs so a project survives a page reload ----------
+const DB_NAME='clipeasy',STORE='files';
+function idbOpen(){return new Promise((res,rej)=>{const r=indexedDB.open(DB_NAME,1);r.onupgradeneeded=()=>r.result.createObjectStore(STORE);r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error)})}
+async function idbPut(key,blob){try{const db=await idbOpen();return new Promise((res,rej)=>{const tx=db.transaction(STORE,'readwrite');tx.objectStore(STORE).put(blob,key);tx.oncomplete=res;tx.onerror=()=>rej(tx.error)})}catch(e){console.warn('idbPut',e)}}
+async function idbGet(key){try{const db=await idbOpen();return new Promise((res,rej)=>{const tx=db.transaction(STORE,'readonly');const r=tx.objectStore(STORE).get(key);r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error)})}catch(e){console.warn('idbGet',e);return null}}
+async function idbClear(){try{const db=await idbOpen();return new Promise((res,rej)=>{const tx=db.transaction(STORE,'readwrite');tx.objectStore(STORE).clear();tx.oncomplete=res;tx.onerror=()=>rej(tx.error)})}catch(e){console.warn('idbClear',e)}}
+function persistProject(){try{localStorage.setItem('clipeasy_project',JSON.stringify({clips:S.clips,ratio:S.ratio,id:S.id,assetMeta:[...S.assets.entries()].map(([id,a])=>({id,name:a.file.name,type:a.type}))}))}catch(e){console.warn('persist',e)}}
+async function restoreProject(){
+  const raw=localStorage.getItem('clipeasy_project');if(!raw)return;
+  try{
+    const proj=JSON.parse(raw);
+    for(const am of (proj.assetMeta||[])){
+      const blob=await idbGet(am.id);if(!blob)continue;
+      const url=URL.createObjectURL(blob);
+      S.assets.set(am.id,{file:{name:am.name},url,type:am.type});
+    }
+    S.clips=(proj.clips||[]).filter(c=>S.assets.has(c.asset));
+    S.ratio=proj.ratio||'9:16';S.id=proj.id||1;
+    for(const c of S.clips){
+      const a=S.assets.get(c.asset);
+      if(a.type.startsWith('image/')){const im=new Image();im.src=a.url;imgs.set(c.id,im)}
+      else{const v=document.createElement('video');v.src=a.url;v.preload='metadata';v.playsInline=true;vids.set(c.id,v)}
+    }
+    S.selected=S.clips[0]?.id||null;
+    if(S.clips.length)$('status').textContent='Aiempi projekti palautettu tämän selaimen muistista.';
+  }catch(e){console.warn('restore failed',e)}
+}
+
+function addFile(f){const id='a'+S.id++,url=URL.createObjectURL(f);S.assets.set(id,{file:f,url,type:f.type});idbPut(id,f);return id}
+function addClip(aid){const a=S.assets.get(aid),image=a.type.startsWith('image/'),c={id:'c'+S.id++,asset:aid,name:a.file.name,start:0,end:image?4:10,speed:1,volume:1,filter:'none',text:'',pos:'bottom',textSize:42};S.clips.push(c);if(!image){const v=document.createElement('video');v.src=a.url;v.preload='metadata';v.playsInline=true;v.onloadedmetadata=()=>{c.end=v.duration||10;render()};vids.set(c.id,v)}else{const im=new Image();im.src=a.url;imgs.set(c.id,im)}if(S.selected===null)S.selected=c.id}
 function addFiles(fs){for(const f of fs){if(f.type.startsWith('video/')||f.type.startsWith('image/')){const a=addFile(f);addClip(a)}}commit();render();$('status').textContent='Media lisätty.'}
 $('pick').onclick=()=>$('files').click();$('files').onchange=e=>addFiles([...e.target.files]);
 $('drop').ondragover=e=>{e.preventDefault();$('drop').classList.add('drag')};$('drop').ondragleave=()=>$('drop').classList.remove('drag');$('drop').ondrop=e=>{e.preventDefault();$('drop').classList.remove('drag');addFiles([...e.dataTransfer.files])};
@@ -81,7 +110,11 @@ function media(){const box=$('media');box.innerHTML='';for(const [id,a] of S.ass
 function tracks(){const box=$('tracks');box.innerHTML='';S.clips.forEach((c,i)=>{const d=document.createElement('div');d.className='clip'+(c.id===S.selected?' selected':'');d.draggable=true;d.innerHTML='<div class="name"></div><div class="meta"></div>';d.querySelector('.name').textContent=c.name;d.querySelector('.meta').textContent=time(dur(c));d.onclick=()=>{S.selected=c.id;render()};d.ondragstart=()=>drag=i;d.ondragover=e=>e.preventDefault();d.ondrop=()=>{if(drag<0||drag===i)return;commit();const [x]=S.clips.splice(drag,1);S.clips.splice(i,0,x);drag=-1;render()};box.append(d)})}
 function props(){const c=chosen();$('none').classList.toggle('hidden',!!c);$('props').classList.toggle('hidden',!c);if(!c)return;$('chosen').textContent=c.name;$('name').value=c.name;$('start').value=c.start;$('end').value=c.end;$('speed').value=c.speed;$('speedText').textContent=c.speed+'×';$('volume').value=c.volume;$('volumeText').textContent=Math.round(c.volume*100)+'%';$('filter').value=c.filter;$('text').value=c.text;$('pos').value=c.pos;$('textSize').value=c.textSize;$('textSizeText').textContent=c.textSize+' px'}
 function change(k,v){const c=chosen();if(!c)return;commit();c[k]=v;if(k==='start'&&c.start>=c.end)c.start=Math.max(0,c.end-.1);if(k==='end'&&c.end<=c.start)c.end=c.start+.1;render()}
-$('name').onchange=e=>change('name',e.target.value);$('start').onchange=e=>change('start',Math.max(0,+e.target.value||0));$('end').onchange=e=>change('end',Math.max(.1,+e.target.value||.1));$('speed').onchange=e=>change('speed',+e.target.value);$('speed').oninput=e=>{$('speedText').textContent=e.target.value+'×';const c=chosen();if(c){c.speed=+e.target.value;tracks();stage()}};$('volume').onchange=e=>change('volume',+e.target.value);$('volume').oninput=e=>{$('volumeText').textContent=Math.round(+$('volume').value*100)+'%'};
+$('name').onchange=e=>change('name',e.target.value);$('start').onchange=e=>change('start',Math.max(0,+e.target.value||0));$('end').onchange=e=>change('end',Math.max(.1,+e.target.value||.1));
+$('speed').onchange=e=>change('speed',+e.target.value);
+$('speed').oninput=e=>{$('speedText').textContent=e.target.value+'×';const c=chosen();if(c){c.speed=+e.target.value;if(S.activeVideo&&S.clips[S.activeIndex]===c)S.activeVideo.playbackRate=c.speed;tracks();stage()}};
+$('volume').onchange=e=>change('volume',+e.target.value);
+$('volume').oninput=e=>{$('volumeText').textContent=Math.round(+$('volume').value*100)+'%';const c=chosen();if(c){c.volume=+$('volume').value;if(S.activeVideo&&S.clips[S.activeIndex]===c){const n=getOrCreateNodes(S.activeVideo);if(n)n.gain.gain.value=c.volume}}};
 $('filter').onchange=e=>change('filter',e.target.value);$('text').onchange=e=>change('text',e.target.value);$('pos').onchange=e=>change('pos',e.target.value);$('textSize').onchange=e=>change('textSize',+e.target.value);$('textSize').oninput=e=>{$('textSizeText').textContent=e.target.value+' px';const c=chosen();if(c){c.textSize=+e.target.value;stage()}};
 $('copy').onclick=()=>{const c=chosen();if(!c)return;commit();const n={...c,id:'c'+S.id++,name:c.name+' – kopio'};S.clips.splice(S.clips.indexOf(c)+1,0,n);if(vids.has(c.id))vids.set(n.id,vids.get(c.id));if(imgs.has(c.id))imgs.set(n.id,imgs.get(c.id));S.selected=n.id;render()};
 $('remove').onclick=()=>{const i=S.clips.findIndex(c=>c.id===S.selected);if(i<0)return;commit();S.clips.splice(i,1);S.selected=S.clips[Math.max(0,i-1)]?.id||null;render()};
@@ -89,14 +122,96 @@ function move(n){const i=S.clips.findIndex(c=>c.id===S.selected);if(i<0||i+n<0||
 $('left').onclick=()=>move(-1);$('right').onclick=()=>move(1);$('addText').onclick=()=>{const c=chosen();if(c){commit();c.text=c.text||'Uusi teksti';render()}};
 function filt(f){return{none:'none',grayscale:'grayscale(1)',sepia:'sepia(1)',brightness:'brightness(1.3)',contrast:'contrast(1.35)'}[f]}
 function contain(el,w,h){const sw=el.videoWidth||el.naturalWidth||w,sh=el.videoHeight||el.naturalHeight||h,s=Math.min(w/sw,h/sh),dw=sw*s,dh=sh*s;ctx.drawImage(el,(w-dw)/2,(h-dh)/2,dw,dh)}
-function stage(){const [w,h]=ratio();canvas.width=w;canvas.height=h;$('empty').classList.toggle('hidden',S.clips.length>0);canvas.classList.toggle('hidden',!S.clips.length);if(!S.clips.length)return;let t=S.time,offset=0,c=S.clips[0];for(const x of S.clips){if(t<=offset+dur(x)){c=x;break}offset+=dur(x)}const a=S.assets.get(c.asset),local=c.start+Math.max(0,t-offset)*c.speed;ctx.fillStyle='#080a10';ctx.fillRect(0,0,w,h);ctx.filter=filt(c.filter)||'none';if(a.type.startsWith('image/')){const im=imgs.get(c.id);if(im?.complete)contain(im,w,h)}else{const v=vids.get(c.id);if(v){try{if(Math.abs(v.currentTime-local)>.08)v.currentTime=local}catch(e){}contain(v,w,h)}}ctx.filter='none';if(c.text){ctx.font='700 '+c.textSize+'px system-ui';ctx.textAlign='center';const y=c.pos==='top'?c.textSize*1.5:c.pos==='middle'?h/2:h-c.textSize*1.8;ctx.lineWidth=c.textSize/10;ctx.strokeStyle='rgba(0,0,0,.8)';ctx.strokeText(c.text,w/2,y);ctx.fillStyle='white';ctx.fillText(c.text,w/2,y)}$('clock').textContent=time(S.time)+' / '+time(total())}
-function toggle(){if(!S.clips.length)return;if(S.playing){S.playing=false;$('play').textContent='▶ Toista';cancelAnimationFrame(raf)}else{if(S.time>=total())S.time=0;S.playing=true;$('play').textContent='Ⅱ Tauko';last=performance.now();loop()}}
-function loop(){if(!S.playing)return;const now=performance.now();S.time+=(now-last)/1000;last=now;if(S.time>=total()){S.time=total();S.playing=false;$('play').textContent='▶ Toista'}stage();if(S.playing)raf=requestAnimationFrame(loop)}
-$('play').onclick=toggle;$('stop').onclick=()=>{S.playing=false;S.time=0;$('play').textContent='▶ Toista';stage()};
-$('new').onclick=()=>{if(confirm('Tyhjennetäänkö projekti?')){commit();S.clips=[];S.assets.clear();S.selected=null;S.time=0;render()}};
+function clipAtTime(t){let offset=0,c=S.clips[0],index=0;for(let i=0;i<S.clips.length;i++){const x=S.clips[i];if(t<=offset+dur(x)){c=x;index=i;break}offset+=dur(x);index=i}return{c,offset,index}}
+function stage(){const [w,h]=ratio();canvas.width=w;canvas.height=h;$('empty').classList.toggle('hidden',S.clips.length>0);canvas.classList.toggle('hidden',!S.clips.length);if(!S.clips.length)return;const {c,offset}=clipAtTime(S.time);const a=S.assets.get(c.asset),local=c.start+Math.max(0,S.time-offset)*c.speed;ctx.fillStyle='#080a10';ctx.fillRect(0,0,w,h);ctx.filter=filt(c.filter)||'none';if(a.type.startsWith('image/')){const im=imgs.get(c.id);if(im?.complete)contain(im,w,h)}else{const v=vids.get(c.id);if(v){try{if(Math.abs(v.currentTime-local)>.08)v.currentTime=local}catch(e){}contain(v,w,h)}}ctx.filter='none';if(c.text){ctx.font='700 '+c.textSize+'px system-ui';ctx.textAlign='center';const y=c.pos==='top'?c.textSize*1.5:c.pos==='middle'?h/2:h-c.textSize*1.8;ctx.lineWidth=c.textSize/10;ctx.strokeStyle='rgba(0,0,0,.8)';ctx.strokeText(c.text,w/2,y);ctx.fillStyle='white';ctx.fillText(c.text,w/2,y)}$('clock').textContent=time(S.time)+' / '+time(total())}
+
+// ---------- Audio graph: routes each video's sound through Web Audio so it can be (a) heard live and (b) mixed into the WebM export ----------
+function ensureAudio(){if(!S.audioCtx){S.audioCtx=new(window.AudioContext||window.webkitAudioContext)();S.audioDest=S.audioCtx.createMediaStreamDestination()}if(S.audioCtx.state==='suspended')S.audioCtx.resume()}
+function getOrCreateNodes(v){if(elNodes.has(v))return elNodes.get(v);if(!S.audioCtx)return null;try{const source=S.audioCtx.createMediaElementSource(v);const gain=S.audioCtx.createGain();source.connect(gain);gain.connect(S.audioCtx.destination);gain.connect(S.audioDest);const n={source,gain};elNodes.set(v,n);return n}catch(e){console.warn('audio graph',e);return null}}
+
+// ---------- Playback engine: plays the real active clip (video or timed image) so audio and video stay in sync, for both live preview and export ----------
+function activateClipAt(index,localTime){
+  if(S.activeVideo){S.activeVideo.pause()}
+  S.activeIndex=index;const c=S.clips[index];if(!c)return;
+  const a=S.assets.get(c.asset);
+  if(a.type.startsWith('image/')){
+    S.activeVideo=null;S.imageClockStart=performance.now()-Math.max(0,localTime-c.start)/c.speed*1000;
+  }else{
+    const v=vids.get(c.id);S.activeVideo=v;
+    if(v){
+      const n=getOrCreateNodes(v);if(n)n.gain.gain.value=c.volume;
+      try{v.currentTime=Math.min(c.end,Math.max(c.start,localTime))}catch(e){}
+      v.playbackRate=c.speed;
+      v.play().catch(()=>{});
+    }
+  }
+}
+function stopPlayback(){
+  S.playing=false;$('play').textContent='▶ Toista';
+  if(S.activeVideo)S.activeVideo.pause();
+  cancelAnimationFrame(raf);
+  if(S.recording&&S.recorder){S.recorder.stop();S.recording=false;$('export').disabled=false}
+}
+function advanceToNext(){
+  const next=S.activeIndex+1;
+  if(next>=S.clips.length){S.time=total();stage();stopPlayback();return}
+  activateClipAt(next,S.clips[next].start);
+  raf=requestAnimationFrame(tick);
+}
+function tick(){
+  if(!S.playing)return;
+  const c=S.clips[S.activeIndex];if(!c){stopPlayback();return}
+  let cumulative=0;for(let i=0;i<S.activeIndex;i++)cumulative+=dur(S.clips[i]);
+  let reachedEnd;
+  if(S.activeVideo){
+    const localElapsed=Math.max(0,S.activeVideo.currentTime-c.start);
+    S.time=cumulative+localElapsed/c.speed;
+    reachedEnd=S.activeVideo.ended||S.activeVideo.currentTime>=c.end-0.02;
+  }else{
+    const localElapsed=((performance.now()-S.imageClockStart)/1000)*c.speed;
+    S.time=cumulative+localElapsed/c.speed;
+    reachedEnd=localElapsed>=(c.end-c.start);
+  }
+  stage();
+  if(reachedEnd)advanceToNext();else raf=requestAnimationFrame(tick);
+}
+function toggle(){
+  if(!S.clips.length)return;
+  if(S.playing){stopPlayback();return}
+  ensureAudio();
+  if(S.time>=total())S.time=0;
+  const {c,offset}=clipAtTime(S.time);
+  const idx=S.clips.indexOf(c);
+  const local=c.start+Math.max(0,S.time-offset)*c.speed;
+  activateClipAt(idx,local);
+  S.playing=true;$('play').textContent='Ⅱ Tauko';
+  raf=requestAnimationFrame(tick);
+}
+$('play').onclick=toggle;
+$('stop').onclick=()=>{stopPlayback();S.time=0;stage()};
+$('new').onclick=async()=>{if(confirm('Tyhjennetäänkö projekti? Myös selaimeen tallennettu kopio poistetaan.')){stopPlayback();S.clips=[];S.assets.clear();S.selected=null;S.time=0;S.history=[];S.future=[];localStorage.removeItem('clipeasy_project');await idbClear();render()}};
 $('demo').onclick=()=>{const c=document.createElement('canvas');c.width=960;c.height=540;const x=c.getContext('2d');x.fillStyle='#5666cc';x.fillRect(0,0,960,540);x.fillStyle='white';x.font='bold 65px system-ui';x.textAlign='center';x.fillText('ClipEasy demo',480,260);c.toBlob(b=>addFiles([new File([b],'demo.png',{type:'image/png'})]),'image/png')};
-$('export').onclick=()=>{if(!S.clips.length)return alert('Lisää ensin mediaa.');if(!canvas.captureStream||!window.MediaRecorder)return alert('Selain ei tue WebM-vientiä. Kokeile Chromea tai Edgeä.');S.playing=false;S.time=0;stage();const rec=new MediaRecorder(canvas.captureStream(30));const chunks=[];rec.ondataavailable=e=>e.data.size&&chunks.push(e.data);rec.onstop=()=>{const a=document.createElement('a');a.href=URL.createObjectURL(new Blob(chunks,{type:'video/webm'}));a.download='clipeasy-export.webm';a.click();$('status').textContent='Vienti valmis.'};rec.start();const step=()=>{if(S.time>=total()){rec.stop();return}S.time+=1/30;stage();requestAnimationFrame(step)};step()};
+
+// ---------- Export: plays the timeline once in real time while MediaRecorder captures the canvas (video) and the audio graph (sound) ----------
+$('export').onclick=()=>{
+  if(!S.clips.length)return alert('Lisää ensin mediaa.');
+  if(!canvas.captureStream||!window.MediaRecorder)return alert('Selain ei tue WebM-vientiä. Kokeile Chromea tai Edgeä.');
+  stopPlayback();
+  ensureAudio();
+  S.time=0;
+  const vTrack=canvas.captureStream(30).getVideoTracks();
+  const aTrack=S.audioDest.stream.getAudioTracks();
+  let mime='video/webm;codecs=vp9,opus';if(!MediaRecorder.isTypeSupported(mime))mime='video/webm';
+  let rec;try{rec=new MediaRecorder(new MediaStream([...vTrack,...aTrack]),{mimeType:mime})}catch(e){rec=new MediaRecorder(new MediaStream([...vTrack,...aTrack]))}
+  const chunks=[];rec.ondataavailable=e=>e.data.size&&chunks.push(e.data);
+  rec.onstop=()=>{const a=document.createElement('a');a.href=URL.createObjectURL(new Blob(chunks,{type:'video/webm'}));a.download='clipeasy-export.webm';a.click();$('status').textContent='Vienti valmis.'};
+  S.recorder=rec;S.recording=true;$('export').disabled=true;$('status').textContent='Viedään…';
+  rec.start();
+  activateClipAt(0,S.clips[0].start);
+  S.playing=true;$('play').textContent='Ⅱ Tauko';
+  raf=requestAnimationFrame(tick);
+};
 document.addEventListener('keydown',e=>{if(['INPUT','SELECT','TEXTAREA'].includes(document.activeElement.tagName))return;const m=e.ctrlKey||e.metaKey;if(m&&e.key==='z'){e.preventDefault();$('undo').click()}if(m&&e.key==='y'){e.preventDefault();$('redo').click()}if(e.code==='Space'){e.preventDefault();toggle()}});
-render();
+(async()=>{await restoreProject();render()})();
 </script>
 </body></html>
